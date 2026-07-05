@@ -1,0 +1,377 @@
+setwd("C:/Users/myPC/OneDrive/Desktop/Quantium_Task2")
+
+getwd()
+list.files()
+
+#######  Libraries Load\
+
+install.packages("data.table")
+install.packages("ggplot2")
+install.packages("tidyr")
+
+library(data.table)
+library(ggplot2)
+library(tidyr)
+
+data <- fread("QVI_data.csv")
+head(data)
+
+
+library(lubridate)
+data[, YEARMONTH := year(DATE) * 100 + month(DATE)]
+
+install.packages("lubridate")
+library(lubridate)
+
+head(data)
+
+
+library(data.table)
+class(data)
+
+library(lubridate)
+data[, YEARMONTH := year(DATE) * 100 + month(DATE)]
+
+head(data)
+
+##Monthly Metrics (measureOverTime)
+measureOverTime <- data[, .(
+  totSales = sum(TOT_SALES),
+  nCustomers = uniqueN(LYLTY_CARD_NBR),
+  nTxnPerCust = uniqueN(TXN_ID) / uniqueN(LYLTY_CARD_NBR),
+  nChipsPerTxn = sum(PROD_QTY) / uniqueN(TXN_ID),
+  avgPricePerUnit = sum(TOT_SALES) / sum(PROD_QTY)
+), by = .(STORE_NBR, YEARMONTH)][order(STORE_NBR, YEARMONTH)]
+
+head(measureOverTime)
+
+
+#Pre-Trial Data Filter
+storesWithFullObs <- unique(
+  measureOverTime[, .N, STORE_NBR][N == 12, STORE_NBR]
+)
+
+preTrialMeasures <- measureOverTime[
+  YEARMONTH < 201902 &
+  STORE_NBR %in% storesWithFullObs
+]
+head(preTrialMeasures)
+length(storesWithFullObs)
+
+
+##calculateCorrelation() Function
+calculateCorrelation <- function(inputTable, metricCol, storeComparison) {
+
+  calcCorrTable <- data.table(
+    Store1 = numeric(),
+    Store2 = numeric(),
+    corr_measure = numeric()
+  )
+
+  storeNumbers <- unique(inputTable$STORE_NBR)
+
+  for(i in storeNumbers){
+
+    if(i != storeComparison){
+
+      corrValue <- cor(
+        inputTable[STORE_NBR == storeComparison, eval(metricCol)],
+        inputTable[STORE_NBR == i, eval(metricCol)]
+      )
+
+      calcCorrTable <- rbind(
+        calcCorrTable,
+        data.table(
+          Store1 = storeComparison,
+          Store2 = i,
+          corr_measure = corrValue
+        )
+      )
+
+    }
+
+  }
+
+  return(calcCorrTable)
+}
+
+
+trial_store <- 77
+
+corr_nSales <- calculateCorrelation(
+  preTrialMeasures,
+  quote(totSales),
+  trial_store
+)
+
+head(corr_nSales)
+
+#######     calculateMagnitudeDistance () Function
+
+calculateMagnitudeDistance <- function(inputTable, metricCol, storeComparison){
+
+  calcDistTable <- data.table(
+    Store1 = numeric(),
+    Store2 = numeric(),
+    YEARMONTH = numeric(),
+    measure = numeric()
+  )
+
+  storeNumbers <- unique(inputTable$STORE_NBR)
+
+  for(i in storeNumbers){
+
+    if(i != storeComparison){
+
+      calculatedMeasure <- data.table(
+        Store1 = storeComparison,
+        Store2 = i,
+        YEARMONTH = inputTable[STORE_NBR == storeComparison, YEARMONTH],
+        measure = abs(
+          inputTable[STORE_NBR == storeComparison, eval(metricCol)] -
+          inputTable[STORE_NBR == i, eval(metricCol)]
+        )
+      )
+
+      calcDistTable <- rbind(calcDistTable, calculatedMeasure)
+
+    }
+
+  }
+
+  minMaxDist <- calcDistTable[, .(
+    minDist = min(measure),
+    maxDist = max(measure)
+  ), by = .(Store1, YEARMONTH)]
+
+  distTable <- merge(
+    calcDistTable,
+    minMaxDist,
+    by = c("Store1","YEARMONTH")
+  )
+
+  distTable[, magnitudeMeasure :=
+              1 - (measure - minDist)/(maxDist - minDist)]
+
+  finalDistTable <- distTable[, .(
+    mag_measure = mean(magnitudeMeasure)
+  ), by = .(Store1, Store2)]
+
+  return(finalDistTable)
+
+}
+
+magnitude_nSales <- calculateMagnitudeDistance(
+  preTrialMeasures,
+  quote(totSales),
+  trial_store
+)
+
+head(magnitude_nSales)
+
+
+
+
+corr_nCustomers <- calculateCorrelation(
+  preTrialMeasures,
+  quote(nCustomers),
+  trial_store
+)
+
+head(corr_nCustomers)
+
+magnitude_nCustomers <- calculateMagnitudeDistance(
+  preTrialMeasures,
+  quote(nCustomers),
+  trial_store
+)
+
+head(magnitude_nCustomers)
+
+corr_nCustomers <- calculateCorrelation(
+  preTrialMeasures,
+  quote(nCustomers),
+  trial_store
+)
+
+
+corr_weight <- 0.5
+
+score_nSales <- merge(
+  corr_nSales,
+  magnitude_nSales,
+  by = c("Store1","Store2")
+)
+
+score_nSales[, scoreNSales :=
+               corr_weight * corr_measure +
+               (1 - corr_weight) * mag_measure]
+
+head(score_nSales)
+
+
+score_nCustomers <- merge(
+  corr_nCustomers,
+  magnitude_nCustomers,
+  by = c("Store1","Store2")
+)
+
+score_nCustomers[, scoreNCust :=
+                   corr_weight * corr_measure +
+                   (1 - corr_weight) * mag_measure]
+
+head(score_nCustomers)
+
+score_Control <- merge(
+  score_nSales[, .(Store1, Store2, scoreNSales)],
+  score_nCustomers[, .(Store1, Store2, scoreNCust)],
+  by = c("Store1","Store2")
+)
+
+
+score_Control[, finalControlScore :=
+                0.5 * scoreNSales +
+                0.5 * scoreNCust]
+                
+                score_Control[order(-finalControlScore)][1:10]
+                
+                control_store <- score_Control[order(-finalControlScore)][1, Store2]
+
+control_store
+
+##Step 15: Sales Trend Graph
+library(ggplot2)
+install.packages("ggplot2")
+library(ggplot2)
+search()
+
+ggplot()
+ggplot(pastSales,
+       aes(x = TransactionMonth,
+           y = totSales,
+           colour = Store_type)) +
+  geom_line(linewidth = 1)
+
+
+ggplot(pastSales,
+       aes(TransactionMonth,
+           totSales,
+           colour = Store_type)) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Total Sales by Month",
+    x = "Month",
+    y = "Total Sales"
+  )
+
+
+
+########customer count graph
+
+pastSales <- copy(measureOverTime)
+
+pastSales[, Store_type := ifelse(
+  STORE_NBR == trial_store,
+  "Trial",
+  ifelse(STORE_NBR == control_store,
+         "Control",
+         "Other Stores")
+)]
+
+pastSales <- pastSales[
+  , .(totSales = mean(totSales)),
+  by = .(YEARMONTH, Store_type)
+]
+
+pastSales[, TransactionMonth := as.Date(
+  paste0(YEARMONTH %/% 100, "-", YEARMONTH %% 100, "-01")
+)]
+
+pastSales <- pastSales[YEARMONTH < 201903]
+
+ggplot(pastSales,
+       aes(TransactionMonth, totSales, colour = Store_type)) +
+  geom_line(linewidth = 1) +
+  labs(title = "Total Sales by Month")
+  
+  
+  
+  ###trialPeriod
+  
+  trialPeriod <- measureOverTime[
+  YEARMONTH >= 201902 &
+  (STORE_NBR == trial_store | STORE_NBR == control_store)
+]
+
+trialPeriod
+
+
+library(ggplot2)
+
+trialPeriod[, Store_type := ifelse(STORE_NBR == trial_store,
+                                   "Trial",
+                                   "Control")]
+
+trialPeriod[, Month := as.Date(
+  paste(YEARMONTH %/% 100,
+        YEARMONTH %% 100,
+        "01",
+        sep = "-")
+)]
+
+ggplot(trialPeriod,
+       aes(x = Month,
+           y = totSales,
+           colour = Store_type,
+           group = Store_type)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Trial vs Control Store Sales",
+       x = "Month",
+       y = "Total Sales")
+       
+       
+###trial effect (t-test) aur final conclusion
+##percantage differance 
+
+trialSales <- measureOverTime[
+  STORE_NBR %in% c(trial_store, control_store)
+]
+
+trialSales <- dcast(
+  trialSales,
+  YEARMONTH ~ STORE_NBR,
+  value.var = "totSales"
+)
+
+names(trialSales) <- c("YEARMONTH", "Trial", "Control")
+
+trialSales[, PercentageDiff := ((Trial - Control) / Control) * 100]
+
+trialSales
+
+##Trial months
+trialSales[YEARMONTH >= 201902]
+
+##Simple t-test
+t.test(
+  trialSales[YEARMONTH < 201902]$PercentageDiff,
+  trialSales[YEARMONTH >= 201902]$PercentageDiff
+)
+
+
+library(ggplot2)
+
+ggplot(trialPeriod,
+       aes(x = TransactionMonth,
+           y = totSales,
+           colour = Store_type,
+           group = Store_type)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(
+    title = "Trial Period Sales Comparison",
+    x = "Month",
+    y = "Total Sales"
+  ) +
+  theme_minimal()
